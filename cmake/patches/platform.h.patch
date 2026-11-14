@@ -1,0 +1,22 @@
+--- a/raop-tools/platform.h
++++ b/raop-tools/platform.h
+@@ -21,7 +21,7 @@
+ #define WIN       0
+ #define FREEBSD   0
+ #define SUNOS	  0
+-#elif defined (_MSC_VER) || defined(__BORLANDC__)
++#elif defined (_WIN32)
+ #define LINUX     0
+ #define OSX       0
+ #define WIN       1
+@@ -88,8 +88,8 @@
+ #include <iphlpapi.h>
+ #include <sys/timeb.h>
+ 
+-#define __attribute__(X)
+-typedef SSIZE_T	ssize_t;
++// GCC attributes preserve RTP wire packing
++
+ 
+ #define usleep(x) Sleep((x)/1000)
+ #define sleep(x) Sleep((x)*1000)

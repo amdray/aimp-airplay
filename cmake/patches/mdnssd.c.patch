@@ -1,0 +1,29 @@
+--- a/mdns-tools/mdnssd.c
++++ b/mdns-tools/mdnssd.c
+@@ -1295,7 +1295,7 @@
+ 
+ 
+ /*---------------------------------------------------------------------------*/
+-bool mdnssd_query(struct mdnssd_handle_s *handle, const char* query, bool unicast, int runtime, mdns_callback_t *callback, void *cookie) {
++bool mdnssd_query_cancelable(struct mdnssd_handle_s *handle, const char* query, bool unicast, int runtime, mdns_callback_t *callback, void *cookie, bool (*cancelled)(const void*), const void *cancel_cookie) {
+   struct sockaddr_in addr;
+   socklen_t addrlen;
+   int res, parsed;
+@@ -1344,7 +1344,9 @@
+ 	read_fd_set = active_fd_set;
+ 	except_fd_set = active_fd_set;
+ 
++	if (cancelled && cancelled(cancel_cookie)) break;
+ 	res = select(handle->sock + 1, &read_fd_set, NULL, &except_fd_set, &sel_time);
++	if (cancelled && cancelled(cancel_cookie)) break;
+ 
+ 	// finishing or suspending query
+ 	if (handle->state == MDNS_IDLE || handle->control == MDNS_SUSPEND || (runtime && now > runtime)) break;
+@@ -1432,3 +1434,7 @@
+ 
+   return rc;
+ }
++
++bool mdnssd_query(struct mdnssd_handle_s *handle, const char* query, bool unicast, int runtime, mdns_callback_t *callback, void *cookie) {
++  return mdnssd_query_cancelable(handle, query, unicast, runtime, callback, cookie, NULL, NULL);
++}

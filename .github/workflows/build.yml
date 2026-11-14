@@ -1,0 +1,79 @@
+name: Build Windows package
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Preserve source line endings
+        shell: pwsh
+        run: git config --global core.autocrlf input
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-openssl
+
+      - name: Prepare SDK
+        shell: pwsh
+        run: |
+          ./tools/Prepare-Sdk.ps1
+          "AIRPLAY_PYTHON=$((Get-Command python).Source)" >> $env:GITHUB_ENV
+
+      - name: Fetch dependencies
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          git clone --no-checkout https://github.com/philippe44/libraop third_party/libraop
+          git -C third_party/libraop checkout --detach 70dffcd1b48c540c5d7ee063c54d6473ff86cbbb
+          git -C third_party/libraop submodule update --init crosstools dmap-parser libmdns libcodecs libopenssl
+          git -C third_party/libraop/libmdns submodule update --init mdnssd
+          git -C third_party/libraop/libcodecs submodule update --init alac soxr
+
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          runtime_path=$(cygpath -m /ucrt64/bin)
+          cmake -S . -B build-ci -G Ninja -DCMAKE_BUILD_TYPE=Release -DOPENSSL_RUNTIME_DIR="$runtime_path"
+          cmake --build build-ci --parallel 2
+
+      - name: Package
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          python_path=$(cygpath -u "$AIRPLAY_PYTHON")
+          "$python_path" tools/package.py --build-dir build-ci --runtime-dir "$(cygpath -m /ucrt64/bin)" --runtime-licenses "$(cygpath -m /ucrt64/share/licenses)" --objdump "$(cygpath -m /ucrt64/bin/objdump.exe)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aimp-airplay-x64
+          path: |
+            dist/aimp_airplay-*-x64.zip
+            dist/aimp_airplay-*-x64.zip.sha256
+            dist/*-x64.aimppack
+            dist/*-x64.aimppack.sha256
+          if-no-files-found: error
+          compression-level: 0

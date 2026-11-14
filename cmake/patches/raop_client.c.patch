@@ -1,0 +1,131 @@
+--- a/raop-tools/raop_client.c
++++ b/raop-tools/raop_client.c
+@@ -1,3 +1,6 @@
++extern void airplay_raop_event(const char*, int);
++struct rtspcl_s;
++extern int airplay_raop_pairing(struct rtspcl_s*);
+ /*
+  * RAOP : Client to control an AirPlay device, RAOP part
+  *
+@@ -739,9 +742,8 @@
+ {
+ 	// Terminate RTP threads and close sockets
+ 	p->ctrl_running = false;
++	p->time_running = false;
+ 	pthread_join(p->ctrl_thread, NULL);
+-
+-	p->time_running = false;
+ 	pthread_join(p->time_thread, NULL);
+ 
+ 	if (p->rtp_ports.ctrl.fd != -1) closesocket(p->rtp_ports.ctrl.fd);
+@@ -1007,6 +1009,8 @@
+ 
+ 	LOG_INFO("[%p]: local interface %s", p, rtspcl_local_ip(p->rtspcl));
+ 
++	if (!airplay_raop_pairing(p->rtspcl)) goto erexit;
++
+ 	// RTSP pairing verify for AppleTV
+ 	if (*p->secret && !rtspcl_pair_verify(p->rtspcl, p->secret)) goto erexit;
+ 
+@@ -1035,9 +1039,16 @@
+ 	} while (p->rtp_ports.time.fd < 0 && port.count < p->port_range);
+ 
+ 	if (p->rtp_ports.time.fd < 0) goto erexit;
++#if WIN
++    DWORD timing_timeout = 1000;
++    if (setsockopt(p->rtp_ports.time.fd, SOL_SOCKET, SO_RCVTIMEO,
++                  (const char*) &timing_timeout, sizeof(timing_timeout)) == SOCKET_ERROR) goto erexit;
++#endif
+ 
+ 	p->time_running = true;
+-	pthread_create(&p->time_thread, NULL, _rtp_timing_thread, (void*) p);
++	if (pthread_create(&p->time_thread, NULL, _rtp_timing_thread, (void*) p)) {
++		p->time_running = false; LOG_ERROR("Cannot start RAOP timing thread"); goto erexit;
++	}
+ 
+ 	// RTSP ANNOUNCE
+ 	if (p->auth && p->crypto) {
+@@ -1233,6 +1244,7 @@
+ 	uint64_t now, timestamp;
+ 	int n;
+ 
++	memset(&addr, 0, sizeof(addr));
+ 	addr.sin_family = AF_INET;
+ 	addr.sin_addr = raopcld->peer_addr;
+ 	addr.sin_port = htons(raopcld->rtp_ports.ctrl.rport);
+@@ -1276,6 +1288,7 @@
+ 	raopcl_data_t *raopcld = (raopcl_data_t*) args;
+ 	struct sockaddr_in addr;
+ 
++	memset(&addr, 0, sizeof(addr));
+ 	addr.sin_family = AF_INET;
+ 	addr.sin_addr = raopcld->peer_addr;
+ 	addr.sin_port = htons(raopcld->rtp_ports.time.rport);
+@@ -1283,21 +1296,19 @@
+ 	while (raopcld->time_running)
+ 	{
+ 		rtp_time_pkt_t req;
++		int n;
++#if !WIN
+ 		struct timeval timeout = { 1, 0 };
+ 		fd_set rfds;
+-		int n;
+-
+ 		FD_ZERO(&rfds);
+ 		FD_SET(raopcld->rtp_ports.time.fd, &rfds);
+-
+ 		if ((n = select(raopcld->rtp_ports.time.fd + 1, &rfds, NULL, NULL, &timeout)) == -1) {
+ 			LOG_ERROR("[%p]: raopcl_time_connect: socket closed on the other end", raopcld);
+ 			usleep(100000);
+ 			continue;
+ 		}
+-
+ 		if (!FD_ISSET(raopcld->rtp_ports.time.fd, &rfds)) continue;
+-
++#endif
+ 		if (addr.sin_port) {
+ 			n = recv(raopcld->rtp_ports.time.fd, (void*) &req, sizeof(req), 0);
+ 		}
+@@ -1305,13 +1316,17 @@
+ 			struct sockaddr_in client;
+ 			int len = sizeof(client);
+ 			n = recvfrom(raopcld->rtp_ports.time.fd, (void*) &req, sizeof(req), 0, (struct sockaddr *)&client, (socklen_t *)&len);
+-			addr.sin_port = client.sin_port;
++			if (n > 0) addr.sin_port = client.sin_port;
+ 			LOG_DEBUG("[%p]: NTP remote port: %d", raopcld, ntohs(addr.sin_port));
+ 		}
+ 
++#if WIN
++		if (n == SOCKET_ERROR && WSAGetLastError() == WSAETIMEDOUT) continue;
++#endif
+ 		if( n > 0) 	{
+-			rtp_time_pkt_t rsp;
+-
++			rtp_time_pkt_t rsp = {0};
++
++			airplay_raop_event("timing_rx", n);
+ 			rsp.hdr = req.hdr;
+ 			rsp.hdr.type = 0x53 | 0x80;
+ 			// just copy the request header or set seq=7 and timestamp=0
+@@ -1334,6 +1349,7 @@
+ 
+ 			n = sendto(raopcld->rtp_ports.time.fd, (void*) &rsp, sizeof(rsp), 0, (void*) &addr, sizeof(addr));
+ 
++			if (n == (int) sizeof(rsp)) airplay_raop_event("timing_tx", n);
+ 			if (n != (int) sizeof(rsp)) {
+ 			   LOG_ERROR("[%p]: error responding to sync", raopcld);
+ 			}
+@@ -1367,12 +1383,7 @@
+ 		fd_set rfds;
+ 		uint64_t now = raopcl_get_ntp(NULL);
+ 
+-		// Send keepalive packet every 25 seconds
+-		if (now - raopcld->last_keepalive >= MS2NTP(25000)) {
+-			LOG_INFO("[%p]: sending keepalive packet", raopcld);
+-			raopcl_keepalive(raopcld);
+-			raopcld->last_keepalive = now;
+-		}
++		// Engine worker owns all RTSP traffic, including keepalive.
+ 
+ 		FD_ZERO(&rfds);
+ 		FD_SET(raopcld->rtp_ports.ctrl.fd, &rfds);

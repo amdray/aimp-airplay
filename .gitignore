@@ -1,0 +1,8 @@
+/build*/
+/dist/
+/sdk/
+/third_party/
+/tests/
+/docs/CPP_FILES.md
+/docs/DEVELOPMENT.md
+AGENTS.md

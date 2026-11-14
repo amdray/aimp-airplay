@@ -1,0 +1,143 @@
+--- a/raop-tools/rtsp_client.c
++++ b/raop-tools/rtsp_client.c
+@@ -1,3 +1,5 @@
++extern void airplay_raop_payload_result(const char*, int);
++extern void airplay_raop_event(const char*, int);
+ /*
+  * RAOP : Client to control an AirPlay device, RTSP part
+  *
+@@ -28,6 +30,7 @@
+ #include "cross_util.h"
+ #include "cross_log.h"
+ #include "rtsp_client.h"
++#include "rtsp_io.h"
+ 
+ #define PUBLIC_KEY_SIZE 32
+ #define SECRET_KEY_SIZE 32
+@@ -100,7 +103,7 @@
+ 
+ 	p->session = NULL;
+ 	if ((p->fd = open_tcp_socket(local, NULL, true)) == -1) return false;
+-	if (!tcp_connect_by_host(p->fd, host, destport)) return false;
++	if (!airplay_tcp_connect(p->fd, host, destport)) return false;
+ 
+ 	struct sockaddr_in name;
+ 	socklen_t namelen = sizeof(name);
+@@ -252,7 +255,10 @@
+ 	free(hds[0].data);
+ 
+ 	if ((temp = kd_lookup(rkd, "Session")) != NULL) {
+-		p->session = strdup(strtrim(temp));
++		temp = strtrim(temp);
++		if (strlen(temp) > 100) { airplay_raop_io_failure("invalid_session", 0); return false; }
++		p->session = strdup(temp);
++		if (!p->session) return false;
+ 		LOG_DEBUG("[%p]: <------ : session:%s", p, p->session);
+ 		return true;
+ 	}
+@@ -428,6 +434,7 @@
+ 		return false;
+ 	}
+ 
++	if (!content || atv_len != PUBLIC_KEY_SIZE + SIGNATURE_SIZE) { free(content); free(buf); airplay_raop_io_failure("invalid_pair_verify", 0); return false; }
+ 	// get atv_pub and atv_data then create shared secret
+ 	memcpy(atv_pub, content, PUBLIC_KEY_SIZE);
+ 	atv_data = malloc(atv_len - PUBLIC_KEY_SIZE);
+@@ -497,6 +504,19 @@
+ }
+ 
+ /*----------------------------------------------------------------------------*/
++int rtspcl_pairing_post(struct rtspcl_s *p, const char *path, const unsigned char *body,
++                         int length, unsigned char *output, int capacity) {
++    key_data_t headers[] = {{"X-Apple-HKP", "4"}, {"Connection", "keep-alive"}, {NULL, NULL}};
++    char *response = NULL;
++    int size = 0;
++    bool ok = exec_request(p, "POST", "application/octet-stream", (char*) (length ? body : (const unsigned char*) ""),
++                           length, 1, headers, NULL, &response, &size, (char*) path);
++    if (!ok || size < 0 || size > capacity || (size && !response)) { free(response); return -1; }
++    if (size) memcpy(output, response, size);
++    free(response);
++    return size;
++}
++
+ bool rtspcl_auth_setup(struct rtspcl_s *p) {
+ 	if (!p) return false;
+ 
+@@ -568,7 +588,7 @@
+ 	const char delimiters[] = " ";
+ 	char *token,*dp;
+ 	int i, rval, len, clen;
+-	int timeout = 10000; // msec unit
++	ULONGLONG deadline = airplay_raop_deadline();
+ 	struct pollfd pfds;
+ 	key_data_t lkd[MAX_KD], *pkd;
+ 
+@@ -641,7 +661,8 @@
+ 		req[len] = '\0';
+ 	}
+ 
+-	rval = send(rtspcld->fd, req, len, 0);
++	airplay_raop_event(cmd, 0);
++	rval = airplay_send(rtspcld->fd, req, len, deadline);
+ 	LOG_DEBUG( "[%p]: ----> : write %s", rtspcld, req );
+ 	free(req);
+ 
+@@ -651,7 +672,9 @@
+ 
+ 	if (!get_response) return true;
+ 
+-	if (http_read_line(rtspcld->fd, line, sizeof(line), timeout, true) <= 0) {
++	if (airplay_read_line(rtspcld->fd, line, sizeof(line), deadline) <= 0) {
++		airplay_raop_event(cmd, -1);
++		airplay_raop_payload_result(content_type, -1);
+ 		LOG_ERROR("[%p]: response : %s request failed", rtspcld, line);
+ 		if (get_response == 1) return false;
+ 		else return true;
+@@ -659,6 +682,8 @@
+ 
+ 	token = strtok(line, delimiters);
+ 	token = strtok(NULL, delimiters);
++	airplay_raop_event(cmd, token ? atoi(token) : -2);
++	airplay_raop_payload_result(content_type, token ? atoi(token) : -2);
+ 
+ 	// ignore 501 when used with OPTIONS
+ 	if (token == NULL || strcmp(token, "200")) {
+@@ -676,9 +701,9 @@
+ 	else pkd = lkd;
+ 	pkd[0].key = NULL;
+ 
+-	while (http_read_line(rtspcld->fd, line, sizeof(line), timeout, true) > 0) {
++	while ((rval = airplay_read_line(rtspcld->fd, line, sizeof(line), deadline)) > 0) {
+ 		LOG_DEBUG("[%p]: <------ : %s", rtspcld, line);
+-		timeout = 1000; // once it started, it shouldn't take a long time
++		// The original request deadline also covers all headers and the body.
+ 
+ 		if (i && line[0] == ' ') {
+ 			size_t j;
+@@ -703,20 +728,23 @@
+ 
+ 		i++;
+ 		pkd[i].key = NULL;
+-	}
+-
++		if (i >= MAX_KD - 1) { kd_free(pkd); shutdown(rtspcld->fd, SD_BOTH); return false; }
++	}
++
++	if (rval < 0 || clen < 0 || clen > 8 * 1024 * 1024) { kd_free(pkd); shutdown(rtspcld->fd, SD_BOTH); return false; }
+ 	if (clen) {
+ 		char *data = malloc(clen);
+ 		int size = 0;
+ 
+ 		while (data && size < clen) {
+-			int bytes = recv(rtspcld->fd, data + size, clen - size, 0);
++			int bytes = airplay_recv(rtspcld->fd, data + size, clen - size, deadline);
+ 			if (bytes <= 0) break;
+ 			size += bytes;
+ 		}
+ 
+ 		if (!data || size != clen) {
+ 			LOG_ERROR("[%p]: content length receive error %p %d", rtspcld, data, size);
++			free(data); kd_free(pkd); shutdown(rtspcld->fd, SD_BOTH); return false;
+ 		}
+ 
+ 		LOG_INFO("[%p]: Body data len %d", rtspcld, clen, data);
