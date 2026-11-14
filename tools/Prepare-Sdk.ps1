@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 $archive = Join-Path ([IO.Path]::GetTempPath()) ('aimp-sdk-' + [Guid]::NewGuid().ToString('N') + '.zip')
 try {
     Invoke-WebRequest -Uri 'https://aimp.ru/?do=download.file&id=15' -OutFile $archive
-    $expected = 'aa449fed93b93af7880a5580d71265231d048115e837b8d79f0c32aec59537a7'
+    $expected = '5ecf7225f522a4c2de45b7b958d0edb4363b218caccfd141289bd5e675bb50d1'
     if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $expected) {
         throw 'AIMP SDK checksum mismatch. Download the pinned SDK 5.40 archive to continue.'
     }
