@@ -2,6 +2,8 @@ name: Build Windows package
 
 on:
   push:
+    branches: ['**']
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -77,3 +79,29 @@ jobs:
             dist/*-x64.aimppack.sha256
           if-no-files-found: error
           compression-level: 0
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: aimp-airplay-x64
+          path: dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          package="dist/aimp_airplay-${RELEASE_TAG#v}-x64.zip"
+          test -s "$package"
+          gh release create "$RELEASE_TAG" "$package" \
+            --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "AIMP AirPlay ${RELEASE_TAG#v}" \
+            --notes "Windows x64. The ZIP contains both AIMP add-on packages and installation instructions."
